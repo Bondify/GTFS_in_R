@@ -1,0 +1,407 @@
+---
+title: "Buses per hour from GTFS"
+author: "Santiago Toso"
+date: "7/25/2018"
+output:
+  html_document:
+    number_sections: yes
+    theme: lumen
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Analyzing buses per hour in R from GTFS data
+
+## Libraries
+
+```{r Libraries}
+library(tidyverse)
+library(pryr)
+library(ggplot2)
+```
+
+## Uploading and reading data
+
+First we choose the GTFS and set a directory to extract it, then we read its content:
+
+```{r Uploading and reading}
+zip <- "/Users/santiagotoso/Google Drive/Master/Curso R/GTFS/Buses per hour/GTFS for TfWM.zip"
+outDir <- substring(zip, 1, nchar(zip)-4)
+setwd(outDir)
+unzip(zip, exdir = outDir)
+
+trips <- read_csv("trips.txt")
+stops <- read_csv("stops.txt")
+shapes <- read_csv("shapes.txt")
+routes <- read_csv("routes.txt")
+stop_times <- read_csv("stop_times.txt", col_types= cols(arrival_time = col_character(), departure_time = col_character()))
+```
+
+Note that in the `stop_times` dataframe we have to force the `arrival_time` and `departure_time` variables to characters. The reason for that is that there are trips that take place after midnight and have 26:45 hr. This becomes a NA in R and we are avoiding this by making them character. We will deal with them later.
+
+## Transforming data
+
+Lets take a look to `stop_times` and its size and format:
+
+```{r Stop_times}
+sapply(stop_times, class)
+object_size(stop_times)
+```
+
+The first thing we notice is that it is pretty heavy. We could speed this up by converting the `character` variables to `numeric`. We'll do that with `stop_id`, `arrival_time` and `departure_time`.
+
+To do the `stop_id` we should first change the `stop_id` in the `stops` dataframe. We don't really need the `stop_id` to work with it. We may need it to export the data afterwards so what we are going to do is to give a `numeric` id and use that one in `stop_times`.
+
+```{r Transforming stops}
+stops <- stops %>% 
+  mutate(stop_numeric_id = seq(1, nrow(stops)) )
+head(stops)
+```
+
+It could be useful to have the `route_id` also in `stop_times` for filtering purposes later. We are going to do something similar to what we did with `stops`. We first have to put a new `id` on `routes` and then join it with `trips` and `stops_times`.
+
+```{r Transforming routes}
+routes <- routes %>% 
+  mutate(route_numeric_id = seq(1, nrow(routes)) )
+head(routes)
+```
+
+Now we join it with `trips`
+
+```{r Transforming trips}
+trips <- trips %>% 
+  left_join(routes) %>% 
+  select(-route_id, -route_short_name, -route_long_name, -route_type, -route_color, -route_text_color, -block_id, -agency_id)
+head(trips)
+```
+
+We can take this `numeric_id` to `stop_times` and use this one for work. We also have `arrival_time` and `departure_time` as characters in `stop_times`. We will transform it to the format `26,5 hours` to work with it and then we will come back to the right format for showing the data.
+
+```{r Transforming stop times}
+stop_times <- stop_times %>% 
+  left_join(stops) %>% 
+  left_join(trips) %>% 
+  select(-stop_name, -stop_lat, -stop_lon, -stop_id) %>% 
+  mutate(arrival_time = as.integer(substr(arrival_time, 1, 2)) + as.integer(substr(arrival_time, 4, 5))/60,
+         departure_time = as.integer(substr(departure_time, 1, 2)) + as.integer(substr(departure_time, 4, 5))/60)
+head(stop_times)
+```
+
+
+## Creating time windows
+
+We called this notebook **Buses per hour** but we could actually analyze the amount of buses for any time window. The first thing will be to define that period:
+
+```{r Span}
+# Period of time in minutes. For example, and hour would be 60 minutes
+span <- 30
+span_hours <- span/60
+span_hours
+```
+
+Now we can find the first and last trip of the day and set the range between them as "a day of buses". Then we can create the different time windows we want to analyze.
+
+```{r Time window}
+day_start <- round(min(stop_times[,"arrival_time"]))
+day_end <- round(max(stop_times[,"arrival_time"]))
+
+starting_time <- seq(day_start, day_end -span_hours, span_hours)
+ending_time <- seq(day_start + span_hours, day_end, span_hours)
+time_windows <- data.frame(window_id = seq(1:length(starting_time)) ,starting_time, ending_time)
+head(time_windows)
+```
+
+## Buses/time window
+
+There are two obvious ways in which we could analyze this: by line or by stop. Each of them would require different data treatment so will tackle on by one.
+
+We are going to try it only for weekdays for now.
+We will also add a column to indentify the time window each stop is in.
+
+```{r Filter weekdays}
+stop_times <- stop_times %>% 
+  filter(service_id == 1)
+
+stop_times['window_id'] <- NA 
+
+head(stop_times)
+```
+
+### By stop
+
+We have 800,092 rows `stop_times`, that's a lot of rows! We could run a loop that identifies the time window for each of the rows but would take too long. Furthermore, if we ever do an app with this it just wouldn't show all at the same time. So, we are going to choose first a `stop_numeric_id` and analyze the amount of buses per hour in that stop. We are going to choose stop "MOOR ST QUEENSWAY - Stop MS3 - Moor St Station" that has `stop_numeric_id = 51`.
+
+```{r Stop filter}
+filtered <- stop_times %>% 
+  filter(stop_numeric_id == 51) %>% 
+  select(stop_numeric_id, route_numeric_id,arrival_time, departure_time, window_id)
+head(filtered)
+```
+We search the time window for each of the rows in `filtered`.
+
+```{r Time window of each row}
+for (i in 1:nrow(filtered)) {
+  for (j in 1:nrow(time_windows)) {
+      filtered_row <- i
+      temp_time_window <- j
+      #temp_stop <- stop_times[i, 'stop_numeric_id']
+      temp_start <- time_windows[temp_time_window, 'starting_time']
+      temp_end <- time_windows[temp_time_window,'ending_time']
+      
+      filtered[filtered_row, ] <- filtered[filtered_row, ] %>% 
+        #filter(is.na(time_window)) %>% 
+        mutate(window_id = ifelse(is.na(window_id),
+                                    ifelse(arrival_time >= temp_start & arrival_time < temp_end, 
+                                           temp_time_window, 
+                                           NA),
+               window_id)
+        )
+  }
+}
+
+head(filtered)
+```
+
+Now we should work on the `x` axis: we'd like to show times in there instead of the `window_id`. To do so we are going to look for the hours in `time_windows` and build them in the right format
+
+```{r x axis}
+time_windows <- time_windows %>% 
+  mutate(x_axis = ifelse(
+  time_windows[,"starting_time"] - floor(time_windows[,"starting_time"]) == 0, #impares,
+  paste(as.character(floor(time_windows[ , 2])),'00', sep = ':' ),
+  paste(as.character(floor(time_windows[ , 2])),as.character((time_windows[,"starting_time"] -
+                                                                floor(time_windows[,"starting_time"]))/span_hours*span), sep = ':' )
+))
+
+head(time_windows)
+```
+
+
+Looks good! Now we have to decide how we group it and plot it. 
+
+We could start grouping the number of trips by time window and line. Maybe a good way of showing it would be to show the sum of all the trips on a stop in a big bar and the trips of a specific line in a smaller one. To do that will generate two different tables.
+
+```{r Number of trips per hour}
+#For get the data for all lines
+filtered_all <- filtered %>% 
+  select(window_id) %>% 
+  group_by(window_id) %>% 
+  count(window_id)
+
+#For get the data for one line
+filtered_line <- filtered %>% 
+   left_join(routes) %>% 
+   select(window_id, route_short_name) %>% 
+   filter(route_short_name == '16') %>% 
+   group_by(window_id, route_short_name) %>% 
+   count(window_id)
+
+filtered_all
+filtered_line
+```
+
+To plot it, we first get the color of the line that comes from the GTFS.
+
+```{r Line color}
+line_color <- filtered_line[1,] %>% 
+  left_join(routes) %>% 
+  select(route_color)
+
+line_color <- paste('#', as.character(line_color[ ,'route_color']), sep = '') 
+```
+We have to add our `x_axis` column to the `dataframes` we are going to plot. And then make sure that it keeps ordering the `x_axis` by `window_id` and not by the character `x_axis`.
+
+```{r Ordering x axis}
+filtered_all <- filtered_all %>% 
+  left_join(time_windows) %>% 
+  select(x_axis, window_id, n)
+
+filtered_line <- filtered_line %>% 
+  left_join(time_windows) %>% 
+  select(x_axis, window_id, route_short_name, n)
+
+filtered_all$x_axis <- factor(filtered_all$x_axis, levels = unique(filtered_all$x_axis))
+filtered_line$x_axis <- factor(filtered_line$x_axis, levels = unique(filtered_line$x_axis))
+```
+
+
+Lets plot it now.
+
+```{r Make a graph, fig.align='center'}
+g <- ggplot(data = filtered_all,
+            aes(x = x_axis, y = n)) + 
+  geom_bar(stat = 'identity', 
+           alpha = 0.5) + 
+  geom_text(aes(label = n), 
+            vjust = -0.3, 
+            color = "black", 
+            size = 2.5) +
+  geom_bar(data = filtered_line,
+           aes(x = x_axis, y = n),
+           stat = 'identity', alpha = 1,
+           fill = line_color) +
+  geom_text(data = filtered_line,
+            aes(label = n),
+            vjust = 1.6, 
+            color = "white", 
+            size = 2.5) +
+  scale_fill_brewer(palette="Dark2")+
+  labs(title = 'Trips by stop', 
+       x = "Time window",
+       y = '') +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line.x = element_line(colour = "grey"), 
+        axis.line.y = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1, size = 6.5),
+        axis.text.y = element_blank(),
+        axis.ticks.x = element_line(colour = "grey"),
+        axis.ticks.y = element_blank(),
+        plot.title = element_text(hjust = 0.5) 
+        )
+  # theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  # theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+  # #theme(legend.position="bottom")
+  #theme_minimal() + 
+  #theme_classic() +
+  #theme_bw() +
+
+?tiff
+
+g
+dev.print(png, file="plot.png", width = 1500, height = 1000)
+
+#ggsave(png, '/Users/santiagotoso/Google Drive/Master/Curso R/GTFS/plot.png')
+#png(filename = '/Users/santiagotoso/Google Drive/Master/Curso R/GTFS/plot.pdf')
+#dev.print(pdf,'/Users/santiagotoso/Google Drive/Master/Curso R/GTFS/plot.pdf')
+#dev.off()
+```
+
+
+
+### By line
+
+To do it by line we could start counting the number of trips that start at a given time window. For that we could keep only the stops with `stop_sequence = 1`. We could also assume that the offer is symetric and keep only the inbound trips, that means `direction_id = 0`.
+
+```{r}
+trips_by_line <- stop_times %>% 
+  filter(stop_sequence == 1 & direction_id == 0) %>% 
+  select(route_numeric_id, arrival_time, window_id)
+
+trips_by_line
+```
+We could now choose a line to try out. 
+
+```{r}
+line <- as.integer(
+  routes %>% 
+  filter(route_short_name == '16') %>% 
+  select(route_numeric_id)
+  )
+
+one_line <- trips_by_line %>% 
+  filter(route_numeric_id == line)
+
+one_line
+```
+And calculate the time window for each of the trips.
+
+```{r}
+for (i in 1:nrow(one_line)) {
+  for (j in 1:nrow(time_windows)) {
+      filtered_row <- i
+      temp_time_window <- j
+      #temp_stop <- stop_times[i, 'stop_numeric_id']
+      temp_start <- time_windows[temp_time_window, 'starting_time']
+      temp_end <- time_windows[temp_time_window,'ending_time']
+      
+      one_line[filtered_row, ] <- one_line[filtered_row, ] %>% 
+        #filter(is.na(time_window)) %>% 
+        mutate(window_id = ifelse(is.na(window_id),
+                                    ifelse(arrival_time >= temp_start & arrival_time < temp_end, 
+                                           temp_time_window, 
+                                           NA),
+               window_id)
+        )
+  }
+}
+
+head(one_line)
+```
+
+Now we could group the values by `window_id` and see how many we have for each as we did before.
+
+```{r}
+#For get the data for all lines
+one_line_count <- one_line %>% 
+  select(window_id) %>% 
+  group_by(window_id) %>% 
+  count(window_id)
+
+one_line_count
+```
+
+```{r}
+one_line_count <- one_line_count %>% 
+  left_join(time_windows) %>% 
+  select(x_axis, window_id, n)
+
+one_line_count$x_axis <- factor(one_line_count$x_axis, levels = unique(one_line_count$x_axis))
+```
+
+
+```{r Make a graph for the line, fig.align='center'}
+g_line <- ggplot(data = one_line_count,
+            aes(x = x_axis, y = n)) + 
+  geom_bar(stat = 'identity', 
+           alpha = 0.5) + 
+  geom_text(aes(label = n), 
+            vjust = -0.3, 
+            color = "black", 
+            size = 2.5) +
+  scale_fill_brewer(palette="Dark2")+
+  labs(title = 'Trips by line', 
+       x = "Time window",
+       y = '') +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line.x = element_line(colour = "grey"), 
+        axis.line.y = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1, size = 6.5),
+        axis.text.y = element_blank(),
+        axis.ticks.x = element_line(colour = "grey"),
+        axis.ticks.y = element_blank(),
+        plot.title = element_text(hjust = 0.5) 
+        )
+  # theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  # theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+  # #theme(legend.position="bottom")
+  #theme_minimal() + 
+  #theme_classic() +
+  #theme_bw() +
+
+?tiff
+
+g_line
+dev.print(png, file="plot_line.png", width = 1500, height = 1000)
+
+#ggsave(png, '/Users/santiagotoso/Google Drive/Master/Curso R/GTFS/plot.png')
+#png(filename = '/Users/santiagotoso/Google Drive/Master/Curso R/GTFS/plot.pdf')
+#dev.print(pdf,'/Users/santiagotoso/Google Drive/Master/Curso R/GTFS/plot.pdf')
+#dev.off()
+```
+
+
+
+
+
+
+
+
+
