@@ -31,6 +31,7 @@ First we choose the GTFS and set a directory to extract it, then we read its con
 ```{r Uploading and reading}
 zip <- "/Users/santiagotoso/Google Drive/Master/Curso R/GTFS/Buses per hour/GTFS for TfWM.zip"
 outDir <- substring(zip, 1, nchar(zip)-4)
+dir.create(outDir)
 setwd(outDir)
 unzip(zip, exdir = outDir)
 
@@ -86,8 +87,12 @@ stop_times <- stop_times %>%
   left_join(stops) %>% 
   left_join(trips) %>% 
   select(-stop_name, -stop_lat, -stop_lon, -stop_id) %>% 
-  mutate(arrival_time = as.integer(substr(arrival_time, 1, 2)) + as.integer(substr(arrival_time, 4, 5))/60,
-         departure_time = as.integer(substr(departure_time, 1, 2)) + as.integer(substr(departure_time, 4, 5))/60)
+  mutate(arrival_time = ifelse((as.integer(substr(arrival_time, 1, 2)) + as.integer(substr(arrival_time, 4, 5))/60) < 24,
+                               as.integer(substr(arrival_time, 1, 2)) + as.integer(substr(arrival_time, 4, 5))/60,
+                               (as.integer(substr(arrival_time, 1, 2)) + as.integer(substr(arrival_time, 4, 5))/60) - 24),
+         departure_time = ifelse((as.integer(substr(departure_time, 1, 2)) + as.integer(substr(departure_time, 4, 5))/60) < 24,
+                                 as.integer(substr(departure_time, 1, 2)) + as.integer(substr(departure_time, 4, 5))/60,
+                                 (as.integer(substr(departure_time, 1, 2)) + as.integer(substr(departure_time, 4, 5))/60) -24)) 
 head(stop_times)
 ```
 
@@ -98,7 +103,7 @@ We called this notebook **Buses per hour** but we could actually analyze the amo
 
 ```{r Span}
 # Period of time in minutes. For example, and hour would be 60 minutes
-span <- 30
+span <- 60
 span_hours <- span/60
 span_hours
 ```
@@ -106,8 +111,8 @@ span_hours
 Now we can find the first and last trip of the day and set the range between them as "a day of buses". Then we can create the different time windows we want to analyze.
 
 ```{r Time window}
-day_start <- round(min(stop_times[,"arrival_time"]))
-day_end <- round(max(stop_times[,"arrival_time"]))
+day_start <- 0
+day_end <- 24
 
 starting_time <- seq(day_start, day_end -span_hours, span_hours)
 ending_time <- seq(day_start + span_hours, day_end, span_hours)
@@ -140,27 +145,18 @@ filtered <- stop_times %>%
   filter(stop_numeric_id == 51) %>% 
   select(stop_numeric_id, route_numeric_id,arrival_time, departure_time, window_id)
 head(filtered)
+
+#filter(stops, stop_numeric_id == 51)
 ```
 We search the time window for each of the rows in `filtered`.
 
 ```{r Time window of each row}
-for (i in 1:nrow(filtered)) {
-  for (j in 1:nrow(time_windows)) {
-      filtered_row <- i
-      temp_time_window <- j
-      #temp_stop <- stop_times[i, 'stop_numeric_id']
-      temp_start <- time_windows[temp_time_window, 'starting_time']
-      temp_end <- time_windows[temp_time_window,'ending_time']
-      
-      filtered[filtered_row, ] <- filtered[filtered_row, ] %>% 
-        #filter(is.na(time_window)) %>% 
-        mutate(window_id = ifelse(is.na(window_id),
-                                    ifelse(arrival_time >= temp_start & arrival_time < temp_end, 
-                                           temp_time_window, 
-                                           NA),
-               window_id)
-        )
-  }
+for (j in 1:nrow(time_windows)) {
+  temp_time_window <- j
+  temp_start <- time_windows[temp_time_window, 'starting_time']
+  temp_end <- time_windows[temp_time_window,'ending_time']
+
+  filtered[filtered$arrival_time >= temp_start & filtered$arrival_time < temp_end, 5] <- temp_time_window
 }
 
 head(filtered)
@@ -312,23 +308,12 @@ one_line
 And calculate the time window for each of the trips.
 
 ```{r}
-for (i in 1:nrow(one_line)) {
-  for (j in 1:nrow(time_windows)) {
-      filtered_row <- i
-      temp_time_window <- j
-      #temp_stop <- stop_times[i, 'stop_numeric_id']
-      temp_start <- time_windows[temp_time_window, 'starting_time']
-      temp_end <- time_windows[temp_time_window,'ending_time']
-      
-      one_line[filtered_row, ] <- one_line[filtered_row, ] %>% 
-        #filter(is.na(time_window)) %>% 
-        mutate(window_id = ifelse(is.na(window_id),
-                                    ifelse(arrival_time >= temp_start & arrival_time < temp_end, 
-                                           temp_time_window, 
-                                           NA),
-               window_id)
-        )
-  }
+for (j in 1:nrow(time_windows)) {
+  temp_time_window <- j
+  temp_start <- time_windows[temp_time_window, 'starting_time']
+  temp_end <- time_windows[temp_time_window,'ending_time']
+
+  one_line[one_line$arrival_time >= temp_start & one_line$arrival_time < temp_end, 3] <- temp_time_window
 }
 
 head(one_line)
@@ -396,12 +381,3 @@ dev.print(png, file="plot_line.png", width = 1500, height = 1000)
 #dev.print(pdf,'/Users/santiagotoso/Google Drive/Master/Curso R/GTFS/plot.pdf')
 #dev.off()
 ```
-
-
-
-
-
-
-
-
-
