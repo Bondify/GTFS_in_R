@@ -1,0 +1,305 @@
+---
+title: "R for GTFS - Trips per hour for each line"
+author: "Santiago Toso"
+output:
+  html_document:
+    number_sections: yes
+    theme: cosmo
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+I have been working a lot with GTFS files in R lately and wanted to share some of the things I`ve learned so far.
+
+A few weeks ago, one of my customers asked if we could color their bus lines depending on the number of trips per hour a line has. To do so, I first had to calculate that number.
+
+In this article I`ll explain how to get the number of trips for a given line from a GTFS using R. Then, I will show how we can export that information to Excel and make a chart with it.
+
+# What is a GTFS?
+
+GTFS stands for “General Transit Feed Specification” and is a world known open source standard for transit agencies. If you belong to the transit world, I’m sure you already know the basics of the information you can manage with it (it is, among other things, how transit agencies communicate with Google Maps). If you haven’t heard about it and want to learn more, I recommend you to take a look at their specifications [here](https://developers.google.com/transit/gtfs/reference/).
+
+# Libraries
+
+If you want to follow the exact scripts detailed on the article you'll have to make sure you have the following libraries installed:
+
+```{r echo = T, results='hide'}
+library(knitr)
+library(tidyverse)
+library(pryr)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+```
+
+# Importing and reading data
+
+For this article I used the GTFS of Madrid`s PTO (called EMT) publicly available [here](https://opendata.emtmadrid.es/Datos-estaticos/Datos-generales.aspx?lang=en-GB). Nonetheless, You could follow the article using your own GTFS if you like.
+
+Once we have downloaded the file, the first thing we have to do is to import it to R. As GTFS files are actually .zip files, we'll use the next script to unzip it and import the files as data frames:
+
+```{r Uploading and reading, results='hide'}
+zip <- "/Users/santiagotoso/Google Drive/Master/Curso R/GTFS/Buses per hour/By line/transitEMT.zip"
+#zip <- file.choose()
+outDir <- substring(zip, 1, nchar(zip)-4)
+
+if (file.exists(outDir)){
+    setwd(outDir)
+} else {
+    dir.create(outDir)
+    setwd(outDir)
+}
+    
+unzip(zip, exdir = outDir)
+
+trips <- read_csv("trips.txt")
+stops <- read_csv("stops.txt")
+shapes <- read_csv("shapes.txt")
+routes <- read_csv("routes.txt")
+stop_times <- read_csv("stop_times.txt", col_types= cols(arrival_time = col_character(), departure_time = col_character()))
+# read_csv(path, col_types by column to force the columns to be in a given format)
+```
+The first line of code is to map where the zip file is (you should change it for the information of your own file). Then, in the second line of code, we define the output directory to be named after the .zip file: We take the whole string and keep everything but the last 4 characters (.zip). Like that, `outDir` is actually **"/Users/santiagotoso/Descktop/transitEMT"**.
+
+In the third line we create a directory placed and named as defined in `outDir`. Finally, we unzip the file an read the .txt files that are inside.
+
+Now we have four data frames, one for each of the relevant files for this exercise: trips, routes and stop_times.
+
+>Note that in the `stop_times` dataframe we have to force the `arrival_time` and `departure_time` variables to characters. The reason for that is that there are trips that take place after midnight and have 26:45 hr. This becomes a NA in R and we are avoiding this by making them character. We will deal with them later.
+
+# What do we have so far?
+
+If you are used to work with GTFS, you might not need this section. If you are still learning how to work with GTFS files it might be helpful to take a moment now and take a look at the information we have on each of the files, how are they connected to each other and in which file is the information we need to get the number of trips per hour for a line.
+
+1.**trips.txt:** this files stores the high level information of each trip. It's id, route, direction, service_id, shape, etc. Notice that the shape is defined by trip and not by route.
+
+```{r}
+kable(head(trips))
+```
+
+2.**routes.txt:** this file stores information for each of the routes. It's id, short and long name, color, etc.
+
+```{r}
+kable(head(routes))
+```
+
+3.**stop_times.txt:** this files stores the detail of each of the trips. More precisely, the sequence of stops each trip follows and the passing time of each of the stops. It doesn't have information about the route itself, but it is related to trips.txt by the trip_id.
+
+```{r}
+kable(head(stop_times))
+```
+
+The main things we see in this file is that ```route_id``` is not present. Instead, it uses the ```trip_id``` to relate it to ```trips``` and from there it can connect with ```routes``` by the ```route_id```. 
+
+Also, we find the ```stop_id```, which makes sense since seems to be the way it is connected to ```stops```.
+
+# Joining data frames
+
+As we can deduce from the previous section, we are going to get the number of trips per hour from the `stop_times` data frame. The tricky thing is that in `stop_times` there is no variable that tells us what route the trips is doing. To get that information we first have to pass through `trips`. This data frame is the one that holds the relationship between the `trip_id` (present in `stop_times`) and the `route_id` (present in routes).
+
+To get all the information we need in the same data frame we are going to travel the diagram above from `stop_times` all the way up to `routes`.
+
+```{r}
+stop_times <- stop_times %>% 
+  left_join(trips) %>% 
+  left_join(routes) %>% 
+  select(route_id, route_short_name, trip_id, stop_id, service_id, arrival_time, departure_time, direction_id, shape_id, stop_sequence)
+  
+kable(head(stop_times))
+```
+
+First we join stop_times with trips. At that point, the data frame has the route_id and the trip_id. Then we join it with `routes`.
+
+Finally, we select the relevant variables to continue. You can take a look at the final data frame with the `head()` function.
+
+Right now, we have the passing time for all the stops (check the column `stop_sequence`). But we only need the first stop to calculate the number of trips per hour. Furthermore, considering that the trips are roundtrips, we only need one direction. If not, we could be duplicating the number of trips per hour.
+
+Also, notice that the `arrival_time` and `departure_time` are characters. This wouldn`t allow us to make mathematical operations with them.
+
+Finally, the column `service_id` tells us that there are many different services that operate in the period of time this GTFS is for. We need to choose one before calculating the number of trips per hour.
+
+In the next section we are going to see how to solve all these issues.
+
+# Filtering and transforming data
+
+## Selecting the service_id with more trips
+
+To solve the issues listed above we can first start by looking for the `service_id` with more trips and only keep that one for analysis.
+```{r}
+bigger_service <- trips %>% 
+  group_by(service_id) %>% 
+  count(service_id) %>%
+  arrange(desc(n)) %>% 
+  head(1)
+
+bigger_service
+```
+
+## Filtering by service_id, stop_sequence and direction_id
+
+Now, we can filter `stop_times` in order to keep only the relevant information for our purpose.
+
+To do so, we are going to keep only the `service_id` with more trips (LA), only the first stop of each trip and one direction of each trip.
+
+```{r Transforming stop times}
+stop_times <- stop_times %>% 
+  filter(
+    stop_sequence == 1 & 
+      direction_id == 0 &
+      service_id == bigger_service$service_id)
+ 
+kable(head(stop_times))
+```
+
+## Transforming characters into numbers
+
+Now that we have only kept the data relevant to our purpose we need to transform the `arrival_time` and `departure_time` (or at least one of them) into numbers that allow us to make mathematical operations with them.
+
+In fact, since we are going to calculate the number of trips per hour, we don`t really need the minutes. We would just need to get the hours value to be able to group them afterwards. Like that, characters like `07:28:00` and `07:45:00` would become the number `7` that is enough for us to calculate that there are two trips per hour from 7am to 8am.
+
+This would be easy if we only had to take the hours number. The tricky part comes when we find numbers that go beyond the 24hs. In this case, `25:00:00` actually means 1am. We will make a transformation in order to solve this issue.
+
+```{r Transforming stop times 1}
+stop_times <- stop_times %>% 
+  mutate(
+    arrival_time = ifelse(
+      as.integer(substr(arrival_time, 1, 2)) < 24,
+      as.integer(substr(arrival_time, 1, 2)),
+      as.integer(substr(arrival_time, 1, 2)) - 24),
+    departure_time = ifelse(
+      as.integer(substr(departure_time, 1, 2)) < 24,
+      as.integer(substr(departure_time, 1, 2)),
+      as.integer(substr(departure_time, 1, 2)) -24)
+    )
+
+kable(head(stop_times))
+```
+
+It is looking pretty good now. Notice that we had to run an `ifelse` condition to treat the numbers that were higher than 24. If they where we took 24 from them; like that, 25h becomes 1h, that was exactly what we were looking for.
+
+Also, we only kept the hours of the arrival and departure time. Now we could group by one of those variables and take count the number of trips on each of the time windows.
+
+## So, what is the number of trips per hour for each of these lines?
+
+Our final step is to calculate the number of trips per hour for each of the lines. Thanks to all the trouble we went through, this is going to be pretty easy now.
+
+```{r Stop filter}
+output_data <- stop_times %>% 
+  group_by_at(vars(route_id, route_short_name, arrival_time)) %>% 
+  count(arrival_time)
+
+kable(head(output_data))
+```
+
+And there it is! We have now the number of trips per hour for each of the lines. We could make it nicer nonetheless. To do so, we are going to change the format of `arrival_time` one more time, from `6` to `6:00`. 
+
+```{r Stop filter 1}
+output_data <- stop_times %>% 
+  group_by_at(vars(route_id, route_short_name, arrival_time)) %>% 
+  count(arrival_time) %>% 
+  mutate(time_window = paste(arrival_time, '00', sep = ':')) %>% 
+  select(route_id, route_short_name, arrival_time, time_window, n)
+
+kable(head(output_data))
+```
+
+In the following sections, we are going to see how to download this data to a .csv file (that you can open with Excel), and make a bar chart and a line chart for one of the lines.
+Let`s choose one line to graph now.
+
+# Export to .csv
+
+```{r}
+write_csv(output_data, '/Users/santiagotoso/Google Drive/Master/Curso R/GTFS/Buses per hour/By line/transitEMT/trips_per_hour.csv' )
+```
+
+You just need to change the path to the direction that you want.
+
+# Creating charts with the number of trips per hour
+
+In this section we will see how to create a bar and line chart to show the number of trips per hour for one specific line.
+To do so, the first thing we are going to do is to filter the information of one specific line. For the example we are following I will choose line 1.
+
+```{r}
+line <- output_data %>% 
+  filter(route_id == '001')
+
+kable(head(line))
+```
+
+Something important when graphing characters that actually represent numbers (or times in this case) is to factorize them so they are sort as numbers. If we don't do that they will be sort as strings (characters) which would mean to have 10:00 first, then 11:00 and so on, instead 6:00 first. To illustrate, this is how our graph would look if we did it right now:
+
+To avoid this undesirable behavior we need to factorize `time_window` first.
+
+```{r}
+line$time_window <- factor(line$time_window, levels = unique(line$time_window))
+```
+
+## Bar chart
+
+Personally, I like my charts cleaner and a bit more colorful. If that is your case too, you could use the code below to get that result. We can make the graph interactive with `ggplotly()` from the `plotly` library.
+
+```{r Make a graph for the line, fig.align='center'}
+g_bar <- ggplot(data = line,
+            aes(x = time_window, y = n)) + 
+  geom_bar(stat = 'identity', fill = 'steelblue', color = 'steelblue') + 
+  geom_text(aes(label = n), 
+            vjust = -0.3, 
+            color = "black", 
+            size = 3) +
+  scale_fill_brewer(palette="Dark2")+
+  labs(title = paste('Trips by hour for route', line$route_short_name, sep = ' '),
+       x = "Time window",
+       y = '') +
+  theme(panel.grid = element_blank(), 
+        panel.background = element_blank(), 
+        axis.line.x = element_line(colour = "grey"), 
+        axis.line.y = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1),
+        axis.text.y = element_blank(),
+        axis.ticks.x = element_line(colour = "grey"),
+        axis.ticks.y = element_blank(),
+        plot.title = element_text(hjust = 0.5) 
+        )
+
+ggplotly(g_bar)
+```
+
+# Line chart
+
+```{r Make a graph for the line 1, fig.align='center'}
+g_line <- ggplot(data = line,
+            aes(x = time_window, y = n, group = 1)) + 
+  geom_line(color = 'steelblue') +
+  geom_point(color = 'steelblue') +
+  geom_text(aes(label = n), 
+            vjust = -2,
+            color = "black",
+            size = 3) +
+  scale_fill_brewer(palette="Dark2")+
+  labs(title = paste('Trips by hour for route', line$route_short_name, sep = ' '),
+        x = "Time window",
+        y = '') +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.line.x = element_line(colour = "grey"),
+        axis.line.y = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1),
+        axis.text.y = element_blank(),
+        axis.ticks.x = element_line(colour = "grey"),
+        axis.ticks.y = element_blank(),
+        plot.title = element_text(hjust = 0.5)
+        )
+
+ggplotly(g_line)
+```
+
+# Conclusion
+We saw how to import a GTFS into R and explore it. Then we studied the relationships between the data frames and took kept the data needed to get the insight we were looking for.
+
+As shown, the maths and methods used to get the number of trips per hour from a GTFS are pretty simple and don't require a deep knowledge of math, non the R language. It is a very good way to start learning R and learning some of the insights you could get from your GTFS.
